@@ -54,7 +54,7 @@
                     </template>
                 </DropDown>
                 <button v-if="!showArchivedProjects && checkPermission('project.project_list',projectData.isGlobalPermission) === true && checkPermission('project.project_create',projectData.isGlobalPermission) === true" class="outline-primary ml-1 font-size-16 p0x-13px" @click="tourTest('isProjectTour'), $emit('createProject')" id="createproject_driver">+ {{$t('ProjectSlider.new_project')}}</button>
-                <button v-if="!showArchivedProjects && currentCompany?.planFeature?.aiPermission && checkPermission('project.project_list',projectData.isGlobalPermission) === true && checkPermission('project.project_create',projectData.isGlobalPermission) === true" class="outline-primary ml-1 font-size-16 p0x-13px aipg-trigger" @click="$emit('createAiProject')" id="createAiProject_driver" :title="$t ? $t('Projects.create_with_ai') : 'Create project with AI'">✨ Create with AI</button>
+                <button v-if="false &&!showArchivedProjects && currentCompany?.planFeature?.aiPermission && checkPermission('project.project_list',projectData.isGlobalPermission) === true && checkPermission('project.project_create',projectData.isGlobalPermission) === true" class="outline-primary ml-1 font-size-16 p0x-13px aipg-trigger" @click="$emit('createAiProject')" id="createAiProject_driver" :title="$t ? $t('Projects.create_with_ai') : 'Create project with AI'">✨ Create with AI</button>
             </div>
         </div>
         </div>
