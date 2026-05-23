@@ -42,6 +42,7 @@ const isOriginAllowed = (origin, allowList) => {
     if (!origin) return true; // no Origin header
     if (origin === 'null') return true;
     if (typeof origin === 'string' && origin.startsWith('file://')) return true;
+    if (typeof origin === 'string' && origin.startsWith('app://')) return true;
     if (typeof origin !== 'string') return false;
     const normalized = origin.replace(/\/+$/, '');
     return allowList.has(normalized);
