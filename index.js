@@ -32,7 +32,7 @@ const app = express();
 // proxy IP. Override via TRUST_PROXY env (e.g. "1" for one upstream, or
 // "true" for any). Safe in dev because requests from outside loopback
 // fall back to req.connection.remoteAddress.
-app.set('trust proxy', process.env.TRUST_PROXY || 'loopback');
+// app.set('trust proxy', process.env.TRUST_PROXY || 'loopback');
 
 // CORS — BUG-002 / #56. Replace wildcard with an env-driven allow-list.
 // See utils/cors.js for the exact rules and supported env vars.
@@ -43,11 +43,11 @@ app.use(cors({ origin: corsOriginDelegate }));
 // existing third-party embeds keep working. Everything else (HSTS,
 // X-Content-Type-Options, X-Frame-Options, Referrer-Policy, etc.) is on
 // with helmet defaults.
-app.use(helmet({
-    contentSecurityPolicy: false,
-    crossOriginEmbedderPolicy: false,
-    crossOriginResourcePolicy: { policy: 'cross-origin' },
-}));
+// app.use(helmet({
+//     contentSecurityPolicy: false,
+//     crossOriginEmbedderPolicy: false,
+//     crossOriginResourcePolicy: { policy: 'cross-origin' },
+// }));
 
 // Global rate limiting. Generous default (600 req/min per IP ≈ 10 req/sec)
 // to leave headroom for SPA polling and bulk operations. Per-account
@@ -55,16 +55,16 @@ app.use(helmet({
 // `Modules/Auth/helper.js#manageResetAttempt` (5 attempts / 15-min
 // window / 30-min lockout), so no separate auth-specific middleware
 // limit is needed here.
-const GLOBAL_RATE_LIMIT = Number(process.env.GLOBAL_RATE_LIMIT_PER_MIN || 600);
+// const GLOBAL_RATE_LIMIT = Number(process.env.GLOBAL_RATE_LIMIT_PER_MIN || 600);
 
-app.use(rateLimit({
-    windowMs: 60 * 1000,
-    max: GLOBAL_RATE_LIMIT,
-    standardHeaders: true,
-    legacyHeaders: false,
-    // Skip Socket.io polling — it uses its own transport throttling.
-    skip: (req) => req.path.startsWith('/socket.io/'),
-}));
+// app.use(rateLimit({
+//     windowMs: 60 * 1000,
+//     max: GLOBAL_RATE_LIMIT,
+//     standardHeaders: true,
+//     legacyHeaders: false,
+//     // Skip Socket.io polling — it uses its own transport throttling.
+//     skip: (req) => req.path.startsWith('/socket.io/'),
+// }));
 // BUG-037 / #91 — body limits.
 // Previously every endpoint accepted 50MB JSON/url-encoded/raw bodies,
 // so any unauthenticated POST could spend the request loop buffering
