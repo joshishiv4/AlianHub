@@ -9,11 +9,12 @@ const multer = require('multer');
 
 const { getProvider, isAnyProviderConfigured } = require('./llmProvider');
 const { PlanSchema, ClarifyResponseSchema, sanitizeMemberIds, tryParseJson } = require('./schemaValidator');
-const { buildSystemPrompt, buildUserMessage, buildRepairPrompt } = require('./promptTemplates');
+const { buildSystemPrompt, buildUserMessage, buildRepairPrompt } = require('./promptBuilder');
 const { briefUpload, extractFromFile, safeUnlink, MAX_BRIEF_BYTES } = require('./briefExtractor');
 const sseEmitter = require('./sseEmitter');
 const orchestrator = require('./orchestrator');
-const { normalizePlanColors, forceDefaultStatusToDoName } = orchestrator;
+const clarifier = require('./clarifier');
+const { normalizePlanColors } = orchestrator;
 
 const PLAN_TTL_SECONDS = 15 * 60;        // 15 min
 const BRIEF_TTL_SECONDS = 30 * 60;       // 30 min
@@ -35,6 +36,32 @@ function audIncludes(aud, companyId) {
 
 function sendError(res, status, message) {
     return res.status(status).send({ status: false, statusText: message });
+}
+
+/**
+ * Maps LLM provider error codes to appropriate HTTP status codes so the
+ * client receives a meaningful status rather than a generic 500.
+ *
+ * LLM_RATE_LIMITED   → 429  (client should back off and retry — resolves in ~60s)
+ * LLM_QUOTA_EXCEEDED → 402  (account out of credits — owner must add balance)
+ * LLM_AUTH_FAILED    → 503  (server config issue, not a client mistake)
+ * LLM_UNAVAILABLE    → 503  (upstream temporarily down)
+ * LLM_TIMEOUT        → 504  (gateway timeout)
+ * LLM_BAD_REQUEST    → 400  (bad model config / invalid params)
+ * LLM_INVALID_OUTPUT → 502  (model returned unparseable output)
+ * anything else      → 500
+ */
+function llmErrorToHttpStatus(error) {
+    const map = {
+        LLM_RATE_LIMITED: 429,
+        LLM_QUOTA_EXCEEDED: 402,
+        LLM_AUTH_FAILED: 503,
+        LLM_UNAVAILABLE: 503,
+        LLM_TIMEOUT: 504,
+        LLM_BAD_REQUEST: 400,
+        LLM_INVALID_OUTPUT: 502,
+    };
+    return (error && error.code && map[error.code]) || 500;
 }
 
 function resolveCompanyId(req) {
@@ -70,11 +97,15 @@ async function loadActiveMembers(companyId) {
     }
 }
 
-async function callLlmForPlan({ description, hints, briefText, members, conversation, clarifyRound }) {
+async function callLlmForPlan({ description, additionalRequirements, briefText, members, clarifications }) {
     const provider = getProvider();
-    const systemPrompt = buildSystemPrompt({ clarifyRound });
-    const userMessage = buildUserMessage({ description, hints, briefText, members, conversation, clarifyRound });
-    const maxTokens = Number(process.env.LLM_MAX_TOKENS_PLAN) || 8000;
+    const systemPrompt = buildSystemPrompt();
+    const userMessage = buildUserMessage({ description, additionalRequirements, briefText, members, clarifications });
+    // 32000 default: large plans (30+ tasks) with 5-block descriptions
+    // routinely run 15-25K output tokens. Claude Sonnet 4.5 supports 64K
+    // output and gpt-5 supports 128K, so 32K is well within bounds for
+    // either provider while still bounding cost.
+    const maxTokens = Number(process.env.LLM_MAX_TOKENS_PLAN) || 32000;
 
     const firstAttempt = await provider.chat({
         systemPrompt,
@@ -83,6 +114,19 @@ async function callLlmForPlan({ description, hints, briefText, members, conversa
         maxTokens,
         temperature: 0.4,
     });
+
+    // Truncation short-circuit: if the model hit max_tokens, the JSON is
+    // physically incomplete and a repair pass with the same budget will
+    // hit the same wall. Surface a clear "raise the budget" error
+    // immediately instead of burning a second LLM call.
+    if (firstAttempt.truncated) {
+        const err = new Error(
+            'The AI ran out of output token budget mid-plan. Raise LLM_MAX_TOKENS_PLAN '
+            + `(currently ${maxTokens}) in your .env to give it more room, or describe a smaller project.`,
+        );
+        err.code = 'LLM_TRUNCATED';
+        throw err;
+    }
 
     const tryValidate = (raw) => {
         const parsed = tryParseJson(raw);
@@ -113,6 +157,15 @@ async function callLlmForPlan({ description, hints, briefText, members, conversa
             temperature: 0.2,
         });
         usedTokens += repairAttempt.totalTokens || 0;
+        // Same truncation guard on the repair pass.
+        if (repairAttempt.truncated) {
+            const err = new Error(
+                'The AI ran out of output token budget on the repair attempt. Raise '
+                + `LLM_MAX_TOKENS_PLAN (currently ${maxTokens}) in your .env, or describe a smaller project.`,
+            );
+            err.code = 'LLM_TRUNCATED';
+            throw err;
+        }
         validated = tryValidate(repairAttempt.content);
         if (!validated.ok) {
             const err = new Error(`LLM output failed validation after repair: ${validated.error}`);
@@ -125,7 +178,7 @@ async function callLlmForPlan({ description, hints, briefText, members, conversa
     return { result: validated.value, tokens: usedTokens, model: (provider && provider.name) || 'unknown' };
 }
 
-async function generatePlanForJob({ jobId, uid, companyId, description, hints, briefText, isPrivateSpace }) {
+async function generatePlanForJob({ jobId, uid, companyId, description, additionalRequirements, briefText, isPrivateSpace, clarifications }) {
     const emit = (payload) => sseEmitter.emit(jobId, payload);
 
     try {
@@ -137,9 +190,7 @@ async function generatePlanForJob({ jobId, uid, companyId, description, hints, b
         // returned a job id, so slow LLM responses no longer trip the proxy.
         emit({ event: 'progress', phase: 'plan', step: 'ai', status: 'started' });
         const { result, tokens, model } = await callLlmForPlan({
-            description, hints, briefText, members,
-            conversation: [],
-            clarifyRound: 3, // force "final round" rules: must return a plan
+            description, additionalRequirements, briefText, members, clarifications,
         });
 
         let { plan } = result;
@@ -160,13 +211,15 @@ async function generatePlanForJob({ jobId, uid, companyId, description, hints, b
 
         // Re-validate after sanitization, then normalize status colors so the
         // preview chips look identical to the saved project (same "bg = text + 35"
-        // convention the orchestrator applies at save time).
+        // convention the orchestrator applies at save time). We deliberately
+        // do NOT rename the first status to "To Do" — Phase A respects the
+        // domain-specific name the model picked.
         const reCheck = PlanSchema.safeParse(plan);
         if (!reCheck.success) {
             const issues = reCheck.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`).join('\n');
             throw new Error(`Plan failed final validation: ${issues}`);
         }
-        plan = forceDefaultStatusToDoName(normalizePlanColors(reCheck.data));
+        plan = normalizePlanColors(reCheck.data);
 
         const planId = token();
         myCache.set(cacheKey('plan', uid, planId), {
@@ -276,12 +329,22 @@ exports.plan = async (req, res) => {
         const description = String((req.body && req.body.description) || '').trim();
         if (description.length < 20) return sendError(res, 400, 'Description must be at least 20 characters');
 
-        const hints = (req.body && req.body.hints) || {};
+        // "Additional requirements" textarea from Step 1 of the wizard — the
+        // single biggest "match my requirements" lever. Capped at 2000 chars
+        // so a runaway paste can't dominate the prompt.
+        const additionalRequirements = String((req.body && req.body.additionalRequirements) || '').trim().slice(0, 2000);
         let briefText = '';
         if (req.body && req.body.briefId) {
             const stash = myCache.get(cacheKey('brief', uid, req.body.briefId));
             if (stash && stash.companyId === companyId) briefText = stash.text;
         }
+
+        // Optional clarifications from the new Clarify step. The frontend
+        // sends an array of { id, question, category, type, answer, skipped }
+        // objects — one entry per question that was asked. We sanitize
+        // here so the prompt builder gets a clean shape regardless of
+        // what the client posted.
+        const clarifications = sanitizeClarifications(req.body && req.body.clarifications);
 
         const jobId = token();
 
@@ -297,9 +360,10 @@ exports.plan = async (req, res) => {
                 uid,
                 companyId,
                 description,
-                hints,
+                additionalRequirements,
                 briefText,
                 isPrivateSpace: !!(req.body && req.body.isPrivateSpace),
+                clarifications,
             }).catch((error) => {
                 logger.error(`AIPG plan job outer error: ${error && error.message ? error.message : error}`);
                 sseEmitter.emit(jobId, {
@@ -312,19 +376,85 @@ exports.plan = async (req, res) => {
         return;
     } catch (error) {
         logger.error(`AIPG plan error: ${error && error.message ? error.message : error}`);
-        const code = error.code === 'LLM_INVALID_OUTPUT' ? 502 : 500;
-        return sendError(res, code, error && error.message ? error.message : 'Plan generation failed. Please try again.');
+        const httpCode = llmErrorToHttpStatus(error);
+        return sendError(res, httpCode, error && error.message ? error.message : 'Plan generation failed. Please try again.');
     }
 };
 
-// /clarify was removed when we collapsed the wizard to one-shot. The route
-// is no longer registered (see routes.js). This stub stays in case any
-// frontend cache still POSTs to the old URL during a deploy roll-out — it
-// returns a clear "endpoint removed, just retry /plan" response instead of
-// 404'ing.
+// /clarify generates a small set of clarifying questions tailored to the
+// brief. The frontend renders them as a Q&A step BEFORE plan generation;
+// the user's answers are then posted back with /plan so the model has
+// authoritative context for the plan. Synchronous (small token budget,
+// no SSE) — the request returns the questions JSON inline.
 exports.clarify = async (req, res) => {
-    return sendError(res, 410, 'Clarification flow was removed. Submit the same description to /plan again.');
+    if (!isAnyProviderConfigured()) {
+        return sendError(res, 503, 'AI provider is not configured');
+    }
+    try {
+        const uid = req.uid;
+        if (!uid) return sendError(res, 401, 'Unauthorized');
+        const companyId = resolveCompanyId(req);
+        if (!companyId) return sendError(res, 403, 'Company access denied');
+
+        const description = String((req.body && req.body.description) || '').trim();
+        if (description.length < 20) return sendError(res, 400, 'Description must be at least 20 characters');
+
+        const additionalRequirements = String((req.body && req.body.additionalRequirements) || '').trim().slice(0, 2000);
+        let briefText = '';
+        if (req.body && req.body.briefId) {
+            const stash = myCache.get(cacheKey('brief', uid, req.body.briefId));
+            if (stash && stash.companyId === companyId) briefText = stash.text;
+        }
+
+        const { understanding, questions, tokens, model } = await clarifier.generateClarifyingQuestions({
+            description,
+            additionalRequirements,
+            briefText,
+        });
+
+        return res.send({
+            status: true,
+            understanding,
+            questions,
+            tokensUsed: tokens,
+            model,
+        });
+    } catch (error) {
+        logger.error(`AIPG clarify error: ${error && error.message ? error.message : error}`);
+        // Non-fatal: a clarify failure should NOT block the user. The
+        // frontend treats a non-OK response as "skip Q&A, go straight to
+        // plan" — same fallback used when the brief is already complete.
+        const httpCode = llmErrorToHttpStatus(error);
+        return sendError(res, httpCode, error && error.message ? error.message : 'Could not generate clarifying questions. You can continue without them.');
+    }
 };
+
+/**
+ * Defensive sanitization of the `clarifications` payload coming from the
+ * client. Drops anything not shaped like a {id, question, …} entry and
+ * caps the array length so a malicious or buggy client can't bloat the
+ * prompt. Returns null if the input is missing/empty/invalid so callers
+ * can treat "no clarifications" uniformly.
+ */
+function sanitizeClarifications(raw) {
+    if (!Array.isArray(raw) || !raw.length) return null;
+    const out = [];
+    for (const entry of raw.slice(0, 12)) {
+        if (!entry || typeof entry !== 'object') continue;
+        const id = typeof entry.id === 'string' ? entry.id.slice(0, 60) : '';
+        const question = typeof entry.question === 'string' ? entry.question.slice(0, 280) : '';
+        if (!id || !question) continue;
+        out.push({
+            id,
+            question,
+            category: typeof entry.category === 'string' ? entry.category.slice(0, 40) : 'misc',
+            type: typeof entry.type === 'string' ? entry.type.slice(0, 40) : 'text',
+            answer: entry.answer === undefined ? null : entry.answer,
+            skipped: !!entry.skipped,
+        });
+    }
+    return out.length ? out : null;
+}
 
 exports.execute = async (req, res) => {
     try {
@@ -359,20 +489,30 @@ exports.execute = async (req, res) => {
             const issues = reCheck.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`).join('\n');
             return sendError(res, 400, `Plan failed validation: ${issues}`);
         }
-        plan = forceDefaultStatusToDoName(normalizePlanColors(reCheck.data));
+        plan = normalizePlanColors(reCheck.data);
 
         // Re-sanitize assignee ids against the current company membership in
-        // case roster changed since /plan was called.
+        // case roster changed since /plan was called. While the roster is
+        // loaded, resolve the current user's display name from `uid` so every
+        // AI-generated activity-log entry (project / task / estimate) is
+        // attributed to the real person who triggered the run — matching the
+        // manual flow — instead of a generic label.
+        let currentUserName = '';
         try {
             const members = await loadActiveMembers(companyId);
             const allowed = new Set(members.map((m) => String(m.id)));
+            const me = members.find((m) => String(m.id) === String(uid));
+            if (me && me.name) currentUserName = me.name;
             const sanitized = sanitizeMemberIds(plan, allowed);
             plan = sanitized.plan;
         } catch (_e) { /* leave as-is */ }
 
         const userData = {
             id: String(uid),
-            Employee_Name: (req.body && req.body.userName) || 'AlainHub AI ',
+            // Prefer the server-resolved roster name (authoritative current
+            // user); fall back to a client-supplied name, then a generic label
+            // only if the user genuinely can't be resolved.
+            Employee_Name: currentUserName || (req.body && req.body.userName) || 'AlianHub AI',
             companyOwnerId: companyId,
         };
 
@@ -402,23 +542,16 @@ function applyEdits(plan, edits) {
         if (typeof edits.project.ProjectCode === 'string') next.project.ProjectCode = edits.project.ProjectCode.toUpperCase().slice(0, 6);
         if (typeof edits.project.description === 'string') next.project.description = edits.project.description.slice(0, 2000);
     }
-    if (Array.isArray(edits.folders)) {
-        for (let i = 0; i < edits.folders.length && i < next.folders.length; i++) {
-            const ef = edits.folders[i];
-            if (!ef) continue;
-            if (typeof ef.folderName === 'string') next.folders[i].folderName = ef.folderName.slice(0, 80);
-            if (Array.isArray(ef.sprints)) {
-                for (let j = 0; j < ef.sprints.length && j < next.folders[i].sprints.length; j++) {
-                    const es = ef.sprints[j];
-                    if (!es) continue;
-                    if (typeof es.sprintName === 'string') next.folders[i].sprints[j].sprintName = es.sprintName.slice(0, 80);
-                    if (Array.isArray(es.tasks)) {
-                        for (let k = 0; k < es.tasks.length && k < next.folders[i].sprints[j].tasks.length; k++) {
-                            const et = es.tasks[k];
-                            if (!et) continue;
-                            if (typeof et.TaskName === 'string') next.folders[i].sprints[j].tasks[k].TaskName = et.TaskName.slice(0, 200);
-                        }
-                    }
+    if (Array.isArray(edits.sprints) && Array.isArray(next.sprints)) {
+        for (let i = 0; i < edits.sprints.length && i < next.sprints.length; i++) {
+            const es = edits.sprints[i];
+            if (!es) continue;
+            if (typeof es.sprintName === 'string') next.sprints[i].sprintName = es.sprintName.slice(0, 80);
+            if (Array.isArray(es.tasks)) {
+                for (let k = 0; k < es.tasks.length && k < next.sprints[i].tasks.length; k++) {
+                    const et = es.tasks[k];
+                    if (!et) continue;
+                    if (typeof et.TaskName === 'string') next.sprints[i].tasks[k].TaskName = et.TaskName.slice(0, 200);
                 }
             }
         }

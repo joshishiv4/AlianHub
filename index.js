@@ -49,22 +49,33 @@ app.use(cors({ origin: corsOriginDelegate }));
 //     crossOriginResourcePolicy: { policy: 'cross-origin' },
 // }));
 
-// Global rate limiting. Generous default (600 req/min per IP ≈ 10 req/sec)
-// to leave headroom for SPA polling and bulk operations. Per-account
-// brute-force protection on auth endpoints lives in
-// `Modules/Auth/helper.js#manageResetAttempt` (5 attempts / 15-min
-// window / 30-min lockout), so no separate auth-specific middleware
-// limit is needed here.
-// const GLOBAL_RATE_LIMIT = Number(process.env.GLOBAL_RATE_LIMIT_PER_MIN || 600);
+// Global rate limiting. Counts only API traffic — static assets and
+// socket.io are skipped so SPA cold-loads can't trip the limit. Set
+// GLOBAL_RATE_LIMIT_PER_MIN=0 (or "off"/"false") to disable entirely;
+// useful for internal deployments where auth-level brute-force
+// protection (Modules/Auth/helper.js#manageResetAttempt) is enough.
+// const rawGlobalLimit = String(process.env.GLOBAL_RATE_LIMIT_PER_MIN ?? '10000').trim().toLowerCase();
+// const rateLimitDisabled = ['0', 'off', 'false', 'no', 'disabled'].includes(rawGlobalLimit);
 
-// app.use(rateLimit({
-//     windowMs: 60 * 1000,
-//     max: GLOBAL_RATE_LIMIT,
-//     standardHeaders: true,
-//     legacyHeaders: false,
-//     // Skip Socket.io polling — it uses its own transport throttling.
-//     skip: (req) => req.path.startsWith('/socket.io/'),
-// }));
+// if (!rateLimitDisabled) {
+//     const GLOBAL_RATE_LIMIT = Math.max(1, Number(rawGlobalLimit) || 10000);
+//     const STATIC_ASSET_RX = /\.(js|mjs|css|map|svg|png|jpe?g|gif|ico|webp|avif|woff2?|ttf|otf|eot|html?|mp4|webm|mp3|wav|pdf)$/i;
+
+//     app.use(rateLimit({
+//         windowMs: 60 * 1000,
+//         max: GLOBAL_RATE_LIMIT,
+//         standardHeaders: true,
+//         legacyHeaders: false,
+//         // Don't count anything that isn't a real API call. Socket.io has
+//         // its own throttling; static assets are not a DoS vector here.
+//         skip: (req) => {
+//             if (req.path.startsWith('/socket.io/')) return true;
+//             if (STATIC_ASSET_RX.test(req.path)) return true;
+//             if (req.path === '/' || req.path.startsWith('/assets/') || req.path.startsWith('/static/')) return true;
+//             return false;
+//         },
+//     }));
+// }
 // BUG-037 / #91 — body limits.
 // Previously every endpoint accepted 50MB JSON/url-encoded/raw bodies,
 // so any unauthenticated POST could spend the request loop buffering

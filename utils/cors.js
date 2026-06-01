@@ -14,7 +14,9 @@
  * Accepted without lookup:
  *   - Requests with no Origin header (same-origin, curl, mobile apps)
  *   - `null` origin (sandboxed iframes, some Electron renderers)
- *   - `file://...` origins (Electron desktop client)
+ *   - `file://...` origins (Electron desktop client, dev builds)
+ *   - `app://...` origins (Electron desktop client served via electron-serve,
+ *     e.g. the packaged time-tracker-app — origin appears as `app://.`)
  *
  * The allow-list is rebuilt on every request so operators can update the
  * env without restarting the process; the cost is a small Set construction
