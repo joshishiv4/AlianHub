@@ -5,6 +5,7 @@ const advanceFilter = require('./helpers/manageGlobalFilter');
 const getTaskCtrl = require('./helpers/getTasksData');
 const { handleEvents } = require('../Company/eventController');
 const logger = require('../../Config/loggerConfig');
+const { requireTaskActionPermission, requirePermission } = require('../../Config/permissionGuard');
 
 exports.init = (app) => {
     app.post('/api/tasks', (req, res) => {
@@ -34,7 +35,7 @@ exports.init = (app) => {
         });
     });
 
-    app.post('/api/v2/tasks', (req, res) => {
+    app.post('/api/v2/tasks', requirePermission('task.task_create'), (req, res) => {
         try {
             taskMongo.create(req.body)
             .then((resData) => {
@@ -54,7 +55,7 @@ exports.init = (app) => {
         }
     });
 
-    app.patch('/api/v2/tasks', (req, res) => {
+    app.patch('/api/v2/tasks', requireTaskActionPermission(), (req, res) => {
         taskMongo[req.body.action](req.body)
         .then((response) => {
             res.send({status: true, statusText: 'Task updated successfully.',data:response});
@@ -92,6 +93,38 @@ exports.init = (app) => {
             });
         } catch (error) {
             logger.error(`ERROR bulk dispatch: ${error.message}`);
+            res.send({ status: false, statusText: error.message });
+        }
+    });
+
+    // Task-to-task relations (blocks / blocked_by / duplicates / duplicated_by
+    // / relates_to). Single endpoint, explicit action allowlist — same dispatch
+    // + verified-header companyId convention as POST /api/v2/tasks/bulk above.
+    // Body: { action: 'add' | 'remove' | 'list', taskId, relatedTaskId?, type?, userData? }
+    app.post('/api/v2/tasks/relations', (req, res) => {
+        try {
+            const RELATION_ACTIONS = {
+                add: 'addTaskRelation',
+                remove: 'removeTaskRelation',
+                list: 'getTaskRelations',
+            };
+            const method = RELATION_ACTIONS[req.body && req.body.action];
+            if (!method) {
+                return res.send({ status: false, statusText: 'Invalid relation action' });
+            }
+            const headerCompanyId = req.headers['companyid'] || '';
+            const payload = { ...req.body, companyId: headerCompanyId };
+
+            taskMongo[method](payload)
+            .then((response) => {
+                res.send(response);
+            })
+            .catch((error) => {
+                logger.error(`ERROR relation ${req.body.action}: ${error.message}`);
+                res.send({ status: false, statusText: error.message });
+            });
+        } catch (error) {
+            logger.error(`ERROR relation dispatch: ${error.message}`);
             res.send({ status: false, statusText: error.message });
         }
     });
