@@ -3,6 +3,8 @@ const { MongoDbCrudOpration } = require("../../utils/mongo-handler/mongoQueries"
 const mongoose = require("mongoose");
 const logger = require("../../Config/loggerConfig");
 const { isShareToken, validateIntakeSubmission, escapeHtml } = require('./helpers/shareRules');
+const reportRules = require('../CustomReports/helpers/reportRules'); // REP-09 — share saved reports
+const bcrypt = require('bcrypt');
 
 // Unauthenticated public pages, server-rendered as plain HTML so the public
 // surface needs no SPA route, login or token. The share token resolves the
@@ -33,6 +35,15 @@ const htmlPage = (title, body) => `<!DOCTYPE html>
 <meta name="robots" content="noindex"><title>${escapeHtml(title)}</title><style>${PAGE_STYLE}</style></head>
 <body><div class="wrap">${body}<div class="footer">Shared via AlianHub</div></div></body></html>`;
 
+// Password gate (server-rendered) shown when a share is password-protected.
+const passwordForm = (token, wrong) => `<h1>Password required</h1>
+    <div class="muted">This shared view is password-protected.</div>
+    ${wrong ? '<div class="muted" style="color:#c0392b">Incorrect password — please try again.</div>' : ''}
+    <form method="POST" action="/share/${escapeHtml(token)}">
+        <label>Password</label><input name="password" type="password" autofocus>
+        <button type="submit">View</button>
+    </form>`;
+
 /* Token -> { companyId, share } or null. */
 async function resolveShare(token) {
     if (!isShareToken(token)) return null;
@@ -46,7 +57,41 @@ async function resolveShare(token) {
         data: [{ _id: index.shareId }],
     }, 'findOne');
     if (!share || share.enabled === false) return null;
+    if (share.expiresAt && new Date(share.expiresAt).getTime() < Date.now()) return null;
     return { companyId: index.companyId, share };
+}
+
+// --- REP-09: report shares — a read-only public view of a saved report (REP-02). ---
+const DIM_LABELS = { status: 'Status', project: 'Project', sprint: 'Sprint' };
+const METRIC_LABELS = { count: 'Task count', points: 'Story points' };
+
+async function runReportRows(companyId, cfg) {
+    const pipeline = reportRules.buildPipeline(cfg);
+    const raw = await MongoDbCrudOpration(companyId, { type: SCHEMA_TYPE.TASKS, data: [pipeline] }, 'aggregate');
+    return (raw || []).map((r) => ({ label: (r._id === null || r._id === undefined || r._id === '') ? '(none)' : String(r._id), value: r.value || 0 }));
+}
+
+async function renderReport(companyId, share) {
+    const report = await MongoDbCrudOpration(companyId, {
+        type: SCHEMA_TYPE.SAVED_REPORTS, data: [{ _id: share.entityId }],
+    }, 'findOne');
+    if (!report || report.deletedStatusKey === 1) {
+        return { title: 'Report', body: '<h1>This report is no longer available.</h1>' };
+    }
+    // Resolve through the same whitelist engine — never raw fields.
+    const check = reportRules.validateConfig(report);
+    const rows = check.valid ? await runReportRows(companyId, check.value) : [];
+    const total = rows.reduce((a, r) => a + (r.value || 0), 0);
+    const dimLabel = DIM_LABELS[check.value && check.value.dimension] || 'Group';
+    const metricLabel = METRIC_LABELS[check.value && check.value.metric] || 'Value';
+    let body = `<h1>${escapeHtml(report.name)}</h1>`;
+    body += '<div class="muted">read-only public report</div>';
+    body += `<div class="group"><h2>${escapeHtml(dimLabel)} · ${escapeHtml(metricLabel)}</h2>`;
+    if (!rows.length) body += '<div class="task"><span class="name">No data.</span></div>';
+    rows.forEach((r) => { body += `<div class="task"><span class="name">${escapeHtml(r.label)}</span><span class="pill">${escapeHtml(r.value)}</span></div>`; });
+    body += `<div class="task"><span class="name"><b>Total</b></span><span class="pill"><b>${escapeHtml(total)}</b></span></div>`;
+    body += '</div>';
+    return { title: report.name, body };
 }
 
 /* GET /share/:token — read-only board grouped by status. */
@@ -57,6 +102,21 @@ exports.renderShare = async (req, res) => {
             return res.status(404).send(htmlPage('Not found', '<h1>This link is not available.</h1>'));
         }
         const { companyId, share } = resolved;
+
+        // Optional password gate (stateless — re-entered per visit).
+        if (share.passwordHash) {
+            const supplied = (req.body && req.body.password) ? String(req.body.password) : '';
+            const ok = supplied && await bcrypt.compare(supplied, share.passwordHash);
+            if (!ok) {
+                return res.send(htmlPage('Protected', passwordForm(req.params.token, req.method === 'POST')));
+            }
+        }
+
+        // REP-09 — report shares render a read-only table instead of a task board.
+        if (share.entityType === 'report') {
+            const rendered = await renderReport(companyId, share);
+            return res.send(htmlPage(rendered.title, rendered.body));
+        }
 
         const [sprint, tasks] = await Promise.all([
             MongoDbCrudOpration(companyId, {

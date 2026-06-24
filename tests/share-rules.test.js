@@ -20,11 +20,15 @@ describe('🌐 PUBLIC SHARES - Rules', () => {
 
     describe('tokens', () => {
 
-        test('generated tokens are 32 hex chars, unique, and recognised', () => {
+        test('generated tokens are 64 hex chars (32 bytes), unique, and recognised', () => {
             const token = generateShareToken();
-            expect(token).toMatch(/^[0-9a-f]{32}$/);
+            expect(token).toMatch(/^[0-9a-f]{64}$/);
             expect(isShareToken(token)).toBe(true);
             expect(generateShareToken()).not.toBe(token);
+        });
+
+        test('legacy 32-hex tokens are still recognised (backward compatible)', () => {
+            expect(isShareToken('a'.repeat(32))).toBe(true);
         });
 
         test('junk tokens are rejected', () => {
@@ -36,8 +40,9 @@ describe('🌐 PUBLIC SHARES - Rules', () => {
 
     describe('validateCreateShare', () => {
 
-        test('sprint shares pass; unknown entity types fail', () => {
+        test('sprint + report shares pass; unknown entity types fail', () => {
             expect(validateCreateShare({ companyId: COMPANY, entityType: 'sprint', entityId: SPRINT }).valid).toBe(true);
+            expect(validateCreateShare({ companyId: COMPANY, entityType: 'report', entityId: SPRINT }).valid).toBe(true);
             expect(validateCreateShare({ companyId: COMPANY, entityType: 'page', entityId: SPRINT }).valid).toBe(false);
         });
 
