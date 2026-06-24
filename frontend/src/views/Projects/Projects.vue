@@ -86,7 +86,7 @@
                                                             <img :src="activeTab !== 'EmbedView'
                                                                     ? projectComponentsIcons(projectData?.ProjectRequiredComponent?.find(x => x.keyName === activeTab)?.keyName)?.icon
                                                                     : projectComponentsIcons(projectData?.ProjectRequiredComponent?.find(x => x.name === embedViewName)?.type)?.icon" alt="list" class="mr-5px">
-                                                            {{activeTab !== 'EmbedView' ? projectData?.ProjectRequiredComponent?.find(x => x.keyName === activeTab)?.name || "N/A" : embedViewName || "N/A"}}
+                                                            {{activeTab !== 'EmbedView' ? viewLabel(projectData?.ProjectRequiredComponent?.find(x => x.keyName === activeTab)?.name) : embedViewName || "N/A"}}
                                                         </span>
                                                         <img :src="listDropIcon" alt="ListDropIcon" :style="[{marginLeft : clientWidth <=375 ? '2px' : '10px'}]"/>
                                                     </div>
@@ -258,6 +258,14 @@
                                             activeTab !== 'Calendar' &&
                                             activeTab !== 'ProjectKanban' &&
                                             activeTab !== 'TableView' &&
+                                            activeTab !== 'Reports' &&
+                                            activeTab !== 'GanttView' &&
+                                            activeTab !== 'RecurringTasks' &&
+                                            activeTab !== 'TimelineView' &&
+                                            activeTab !== 'MindMapView' &&
+                                            activeTab !== 'WhiteboardView' &&
+                                            activeTab !== 'CanvasView' &&
+                                            activeTab !== 'MapView' &&
                                             (clientWidth > 767 || activeTab !== 'ProjectDetail')
                                 },
                                 {'board-veiw-main-parent': activeTab === 'ProjectKanban'}
@@ -302,7 +310,7 @@
                             />
                             <component
                                 v-if="(clientWidth <= 767 && isVisible == true && isRuleData == false) || (clientWidth > 767 && isRuleData == false)"
-                                :class="[{'showProjectDetailRight':activeTab !== 'ProjectListView' && activeTab !== 'Calendar' && activeTab != 'EmbedViewItem' && activeTab !== 'Workload' && activeTab !== 'ProjectKanban' && activeTab !== 'TableView'}]"
+                                :class="[{'showProjectDetailRight':activeTab !== 'ProjectListView' && activeTab !== 'Calendar' && activeTab != 'EmbedViewItem' && activeTab !== 'Workload' && activeTab !== 'ProjectKanban' && activeTab !== 'TableView' && activeTab !== 'Reports' && activeTab !== 'GanttView' && activeTab !== 'RecurringTasks' && activeTab !== 'TimelineView' && activeTab !== 'MindMapView' && activeTab !== 'WhiteboardView' && activeTab !== 'CanvasView' && activeTab !== 'MapView'}]"
                                 :is="getView(activeTab)"
                                 :data="selectedEmbedView"
                                 :sprints="sprints"
@@ -324,7 +332,7 @@
                                 :sprintLoading="sprintLoading"
                                 :commentType="'project'"
                             />
-                            <ProjectDetailRightSide v-if="activeTab !== 'ProjectListView' && clientWidth > 767 && activeTab !== 'Calendar' && activeTab != 'EmbedView' && activeTab !== 'Workload' && activeTab !== 'ProjectKanban' && activeTab !== 'TableView'" :projectData="projectData" @rightSideBarEmit="handleEmitProjectRightSide" @description="handleDescription"/>
+                            <ProjectDetailRightSide v-if="activeTab !== 'ProjectListView' && clientWidth > 767 && activeTab !== 'Calendar' && activeTab != 'EmbedView' && activeTab !== 'Workload' && activeTab !== 'ProjectKanban' && activeTab !== 'TableView' && activeTab !== 'Reports' && activeTab !== 'GanttView' && activeTab !== 'RecurringTasks' && activeTab !== 'TimelineView' && activeTab !== 'MindMapView' && activeTab !== 'WhiteboardView' && activeTab !== 'CanvasView'" :projectData="projectData" @rightSideBarEmit="handleEmitProjectRightSide" @description="handleDescription"/>
                         </div>
                         <div class="position-ab z-index-1 p-5px border-radius-5-px text-center p0x-15px archived_wrapper" v-if="projectData?.deletedStatusKey === 2">
                             <div>
@@ -466,6 +474,14 @@ const BoardView = defineAsyncComponent(() => import(/* webpackChunkName: "projec
 const ProjectDetail = defineAsyncComponent(() => import(/* webpackChunkName: "project-detail" */ '@/views/Projects/ProjectDetail/ProjectDetail.vue'));
 const TableViewComp = defineAsyncComponent(() => import(/* webpackChunkName: "project-table-view" */ '@/views/Projects/TableView/TableView.vue'));
 const EmbedViewItem = defineAsyncComponent(() => import(/* webpackChunkName: "embed-view" */ '@/components/molecules/EmbedView/EmbedViewItem.vue'));
+const ReportsView = defineAsyncComponent(() => import(/* webpackChunkName: "project-reports" */ '@/views/Projects/Reports/ReportsView.vue'));
+const GanttViewComp = defineAsyncComponent(() => import(/* webpackChunkName: "project-gantt" */ '@/views/Projects/GanttView/GanttView.vue'));
+const RecurringTasksComp = defineAsyncComponent(() => import(/* webpackChunkName: "project-recurring" */ '@/views/Projects/RecurringTasks/RecurringTasksManager.vue'));
+const TimelineViewComp = defineAsyncComponent(() => import(/* webpackChunkName: "project-timeline" */ '@/views/Projects/TimelineView/TimelineView.vue'));
+const MindMapViewComp = defineAsyncComponent(() => import(/* webpackChunkName: "project-mindmap" */ '@/views/Projects/MindMapView/MindMapView.vue'));
+const WhiteboardViewComp = defineAsyncComponent(() => import(/* webpackChunkName: "project-whiteboard" */ '@/views/Projects/WhiteboardView/WhiteboardView.vue'));
+const CanvasViewComp = defineAsyncComponent(() => import(/* webpackChunkName: "project-canvas" */ '@/views/Projects/CanvasView/CanvasView.vue'));
+const MapViewComp = defineAsyncComponent(() => import(/* webpackChunkName: "project-map" */ '@/views/Projects/MapView/MapView.vue'));
 import NotFound from '../NotFound.vue';
 
 // EXTRACTED PIECES
@@ -488,7 +504,10 @@ import { useProjectsHelper } from './helper';
 
 // UTILS
 const { checkErrors } = useValidation();
-const { t } = useI18n();
+const { t, te } = useI18n();
+// Short display label for a view tab: the ViewList i18n value drops the "View"
+// suffix (e.g. "Map View" → "Map"); fall back to the raw name for custom/embed views.
+const viewLabel = (name) => (name && te(`ViewList.${name}`)) ? t(`ViewList.${name}`) : (name || 'N/A');
 const { projects, filteredProjects, dispatchProjects } = useProjectsHelper();
 const showArchivedProjects = ref(false);
 const isAdvanceFilterApplied = ref(false);
@@ -1084,6 +1103,22 @@ function getView(val) {
             return ProjectListView;
         case 'ProjectKanban':
             return BoardView;
+        case 'Reports':
+            return ReportsView;
+        case 'GanttView':
+            return GanttViewComp;
+        case 'RecurringTasks':
+            return RecurringTasksComp;
+        case 'TimelineView':
+            return TimelineViewComp;
+        case 'MindMapView':
+            return MindMapViewComp;
+        case 'WhiteboardView':
+            return WhiteboardViewComp;
+        case 'CanvasView':
+            return CanvasViewComp;
+        case 'MapView':
+            return MapViewComp;
         default:
             return NotFound;
     }
