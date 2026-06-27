@@ -57,6 +57,7 @@ const {
     webhooksSchema,
     webhookLogsSchema,
     recentVisitsSchema,
+    stickiesSchema,
     apiTokensSchema,
     apiActivityLogsSchema,
     exportJobsSchema,
@@ -201,6 +202,8 @@ exports.checkType = (type) => {
             return webhookLogsSchema
         case SCHEMA_TYPE.RECENTVISITS:
             return recentVisitsSchema
+        case SCHEMA_TYPE.STICKIES:
+            return stickiesSchema
         case SCHEMA_TYPE.API_TOKENS:
             return apiTokensSchema
         case SCHEMA_TYPE.API_ACTIVITY_LOGS:
@@ -375,6 +378,8 @@ exports.tableType = (type) => {
                 return `${dbCollections.WEBHOOK_LOGS}`
         case SCHEMA_TYPE.RECENTVISITS:
                 return `${dbCollections.RECENTVISITS}`
+        case SCHEMA_TYPE.STICKIES:
+                return `${dbCollections.STICKIES}`
         case SCHEMA_TYPE.API_TOKENS:
                 return `${dbCollections.API_TOKENS}`
         case SCHEMA_TYPE.API_ACTIVITY_LOGS:
