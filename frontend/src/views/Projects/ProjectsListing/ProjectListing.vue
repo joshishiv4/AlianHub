@@ -334,10 +334,10 @@ const loadMoreProjects = () => {
 
 
 
-function getSprintData(id, forceRefresh = false) {
+function getSprintData(id) {
     return new Promise((resolve, reject) => {
         try {
-            if(!forceRefresh && Object.keys(getters["projectData/sprints"]).includes(id)){
+            if(Object.keys(getters["projectData/sprints"]).includes(id)){
                 if(!sprintData.value || !Object.keys(sprintData.value || {}).length){
                     sprintData.value = getters["projectData/sprints"][id];
                 }
@@ -418,14 +418,14 @@ function getFolderData(id) {
     })
 }
 
-const getSprintFolderData = async (id,isUpdate = false, forceRefresh = false) => {
+const getSprintFolderData = async (id,isUpdate = false) => {
     try {
         if(!isUpdate){
             loadingData.value[id] = true;
             emit('update:sprintLoading', true);
         }
         if (search.value === '' || projectSearch.value) {
-            await Promise.allSettled([getSprintData(id, forceRefresh), getFolderData(id)])
+            Promise.allSettled([getSprintData(id), getFolderData(id)])
             .then((results) => {
                 const resolvedPromises = results.filter((result) => result.status === 'fulfilled');
                 if (resolvedPromises.length === 2) {
@@ -632,7 +632,7 @@ function handleSearchUpdateProject (searchValues) {
 // user clicking a project in the sidebar triggers — commit-to-Vuex,
 // route push with the right tab query, and `update:projectData` emit
 // so the parent's watchers load sprints / tasks.
-defineExpose({toggleSidebar, mutateCurrentProjectDetails, getSprintFolderData})
+defineExpose({toggleSidebar, mutateCurrentProjectDetails})
 </script>
 
 <style>
