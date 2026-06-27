@@ -126,6 +126,11 @@ jobs:
           host: ${{ secrets.DO_HOST }}
           username: ${{ secrets.DO_USER }}
           key: ${{ secrets.DO_SSH_KEY }}
+          # Default command_timeout is 10m — a clean `npm ci` of the backend
+          # (single-threaded native builds) exceeds that and the step is
+          # killed mid-install ("Run Command Timeout"), leaving node_modules
+          # half-written. Give the on-server install real headroom.
+          command_timeout: 30m
           script: |
             set -e
 
