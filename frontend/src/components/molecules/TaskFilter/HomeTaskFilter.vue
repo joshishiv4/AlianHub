@@ -384,8 +384,7 @@ const manageComparisonArray = (key) => {
     let arrayData = [];
     if(arraykeys.includes(key)) {
         arrayData = [
-            { value: ':', name: "Is" },
-            { value: ':!=', name: "Not_Equals_To" }
+            { value: ':', name: "Is" }
         ]
     } else if(dateKeys.includes(key)) {
         arrayData = [
@@ -517,11 +516,7 @@ const applyFilter = (data) => {
             const filteField = `${queryField}.${filterOn}`;
             filterBy[condition].push({[filteField]: {$in: query.values}});
         } else if(query.name.type === "string" || query.name.type === "array"){
-            if(comparison === ':!=') {
-                filterBy[condition].push({[filterOn]: {$nin: query.values}});
-            } else {
-                filterBy[condition].push({[filterOn]: {$in: query.values}});
-            }
+            filterBy[condition].push({[filterOn]: {$in: query.values}});
         } else if(query.name.type === "date") {
             const date = new Date(query.date);
             const now = moment(new Date(query.date));
