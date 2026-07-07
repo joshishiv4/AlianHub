@@ -26,6 +26,8 @@
                     non-owners.
                 -->
                 <SettingScreenshotRetention />
+                <SettingAutoCloseProjects />
+                <SettingTimeReminder />
             </div>
         </div>
     </div>
@@ -43,6 +45,8 @@ import SettingMilestoneStatus from "@/components/molecules/Setting/SettingMilest
 import settingFileExtesnsions from "@/components/molecules/Setting/SettingFileExtensions.vue";
 import SettingCurrency from "@/components/molecules/Setting/SettingCurrencys.vue";
 import SettingScreenshotRetention from "@/components/molecules/Setting/SettingScreenshotRetention.vue";
+import SettingAutoCloseProjects from "@/components/molecules/Setting/SettingAutoCloseProjects.vue";
+import SettingTimeReminder from "@/components/molecules/Setting/SettingTimeReminder.vue";
 import { defineComponent} from "vue";
 import { useCustomComposable } from '@/composable';
 const accesDenied = require("@/assets/images/access_denied_img.png");
@@ -56,7 +60,9 @@ defineComponent({
         SettingMilestoneWeeklyRange,
         settingFileExtesnsions,
         SettingCurrency,
-        SettingScreenshotRetention
+        SettingScreenshotRetention,
+        SettingAutoCloseProjects,
+        SettingTimeReminder
     }
 })
 
