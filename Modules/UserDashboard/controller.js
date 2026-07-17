@@ -7,6 +7,7 @@ const logger = require("../../Config/loggerConfig");
 const dashboardTemplate = require("../../utils/dashboardTemplate.json");
 const cardComponent = require("../../utils/cardComponent.json");
 const { getUsdRates, toUsd } = require("../../utils/currencyRates");
+const { fetchRules } = require("../settings/securityPermissions/controller");
 const {
     getDayOrRangeBounds,
     buildUserTeamMap,
@@ -59,6 +60,43 @@ async function resolveCallerRoleType(companyId, uid) {
     } catch (e) {
         logger.error(`resolveCallerRoleType error (company=${companyId}, uid=${uid}): ${e.message || e}`);
         return 3;
+    }
+}
+
+// SECURITY: project-level visibility for the company-wide project cards. Mirrors
+// the project-list scoping (Modules/Project/controller/getProjectFilterData.js):
+// owner/admin (roleType 1|2) see everything (returns null → no filter); a member
+// sees private projects they belong to (AssigneeUserId includes their id or a
+// team id) plus public projects — public are also membership-gated unless the
+// caller holds the `public_projects` permission. Returns a Mongo sub-filter to
+// merge into a PROJECTS query, or null for no restriction. Fails closed (member
+// scope) on any lookup error.
+async function resolveVisibleProjectFilter(companyId, uid) {
+    if (!uid) return { _id: { $in: [] } }; // no identity → see nothing
+    try {
+        const [teams, rules, roleType] = await Promise.all([
+            MongoDbCrudOpration(companyId, {
+                type: SCHEMA_TYPE.TEAMS_MANAGEMENT,
+                data: [{ assigneeUsersArray: { $in: [String(uid)] } }, { _id: 1 }],
+            }, "find").catch(() => []),
+            fetchRules(companyId).catch(() => []),
+            resolveCallerRoleType(companyId, uid),
+        ]);
+        if (roleType === 1 || roleType === 2) return null; // admin/owner → all projects
+        const teamIds = (teams || []).map((t) => "tId_" + t._id);
+        const member = { $in: [String(uid), ...teamIds] };
+        const rule = Array.isArray(rules) ? rules.find((x) => x && x.key === "public_projects") : null;
+        const showAllProjects = !!(rule && rule.roles && rule.roles.find((r) => r.key === roleType && r.permission === true));
+        return {
+            $or: [
+                { isPrivateSpace: true, AssigneeUserId: member },
+                { isPrivateSpace: false, ...(showAllProjects ? {} : { AssigneeUserId: member }) },
+            ],
+        };
+    } catch (e) {
+        logger.error(`resolveVisibleProjectFilter error (company=${companyId}, uid=${uid}): ${e.message || e}`);
+        // Fail closed to member-only-nothing rather than leaking company-wide.
+        return { _id: { $in: [] } };
     }
 }
 
@@ -749,13 +787,17 @@ exports.getProjectUtilizationSummary = async (req, res) => {
         // needs the per-project rows behind each number, not just totals.
         const includeProjects = req.body && req.body.includeProjects === true;
 
+        // SECURITY: scope to the caller's visible projects. Owner/admin → null
+        // (all projects); a member → only projects they belong to / public ones.
+        const projFilter = await resolveVisibleProjectFilter(companyId, req.uid);
+
         // 1 + 3 — active projects and their ProjectType mix. Drill-down also
         // needs each project's status + its per-project status palette
         // (projectStatusData) so the modal can render the status in colour.
         const activeProjects = await MongoDbCrudOpration(companyId, {
             type: SCHEMA_TYPE.PROJECTS,
             data: [
-                { statusType: { $nin: ["close"] }, deletedStatusKey: 0 },
+                { statusType: { $nin: ["close"] }, deletedStatusKey: 0, ...(projFilter || {}) },
                 includeProjects
                     ? { ProjectType: 1, ProjectName: 1, status: 1, statusType: 1, projectStatusData: 1 }
                     : { ProjectType: 1, ProjectName: 1 },
@@ -791,10 +833,17 @@ exports.getProjectUtilizationSummary = async (req, res) => {
         (timelogs || []).forEach((ts) => {
             if (ts.ProjectId) workingProjectIds.add(String(ts.ProjectId));
         });
+        // For a scoped (member) caller, count only projects they can see; admins
+        // (projFilter === null) keep the company-wide count unchanged.
+        let workingProjects = workingProjectIds.size;
+        if (projFilter) {
+            const accessibleIds = new Set((activeProjects || []).map((p) => String(p._id)));
+            workingProjects = [...workingProjectIds].filter((id) => accessibleIds.has(id)).length;
+        }
 
         const data = {
             activeProjects: (activeProjects || []).length,
-            workingProjects: workingProjectIds.size,
+            workingProjects,
             typeMix,
         };
         if (includeProjects) {
@@ -978,15 +1027,30 @@ exports.getMilestoneSummary = async (req, res) => {
         });
         due.outstandingUsd = Math.max(0, due.receivableUsd - due.receivedUsd);
 
-        // Most-recent activity first — statusDate (epoch ms) is the milestone's
-        // own timeline; fall back to the document timestamps.
+        // statusDate (epoch ms) is the milestone's own activity timestamp; fall
+        // back to the document timestamps. Kept for the legacy `date` field.
         const dateOf = (m) => Number(m.statusDate)
             || (m.updatedAt ? new Date(m.updatedAt).getTime() : 0)
             || (m.createdAt ? new Date(m.createdAt).getTime() : 0);
-        const recent = [...milestones]
-            .filter((m) => inRange(m) && matchStatus(m))
-            .sort((a, b) => dateOf(b) - dateOf(a))
-            .slice(0, RECENT_LIMIT)
+
+        // The list is a due-date TIMELINE (past → present → future) within the
+        // selected range. All in-range items have a dueDate > 0 (see inRange).
+        // To show both sides of "now" we window around the present: take the
+        // nearest upcoming milestones and the nearest recent-past ones, then
+        // order the picked set ascending by dueDate so the card reads
+        // past → today → upcoming rather than always truncating the future away.
+        const nowMs = Date.now();
+        const dueOf = (m) => Number(m.dueDate) || 0;
+        const inScope = milestones.filter((m) => inRange(m) && matchStatus(m));
+        const future = inScope.filter((m) => dueOf(m) > nowMs).sort((a, b) => dueOf(a) - dueOf(b));   // nearest upcoming first
+        const pastNow = inScope.filter((m) => dueOf(m) <= nowMs).sort((a, b) => dueOf(b) - dueOf(a)); // nearest recent-past first
+        let futurePick = future.slice(0, Math.ceil(RECENT_LIMIT / 2));
+        let pastPick = pastNow.slice(0, RECENT_LIMIT - futurePick.length);
+        if (pastPick.length + futurePick.length < RECENT_LIMIT) {
+            futurePick = future.slice(0, RECENT_LIMIT - pastPick.length); // backfill when past is short
+        }
+        const recent = [...pastPick, ...futurePick]
+            .sort((a, b) => dueOf(a) - dueOf(b)) // timeline order
             .map((m) => {
                 const proj = projectsMap[String(m.projectId)] || {};
                 return {
@@ -996,6 +1060,7 @@ exports.getMilestoneSummary = async (req, res) => {
                     amountUsd: usdOf(m),
                     status: m.statusId || "",
                     date: dateOf(m) || null,
+                    dueDate: dueOf(m) || null,
                 };
             });
 
@@ -1253,6 +1318,8 @@ exports.getTeamLoggedVsEta = async (req, res) => {
                     taskId: tid,
                     taskName: task.TaskName || "",
                     taskKey: task.TaskKey || "",
+                    projectId: task.ProjectID ? String(task.ProjectID) : "",
+                    sprintId: task.sprintId ? String(task.sprintId) : "",
                     projectName: projectsMap[String(task.ProjectID)] || "",
                     loggedMinutes: logged,
                     etaMinutes: eta,
@@ -1362,10 +1429,15 @@ exports.getProjectProgressMetric = async (req, res) => {
         };
 
         // Active project criteria — matches the app's "active" definition:
-        // not closed, not deleted. Counted COMPANY-WIDE (no viewer scope).
+        // not closed, not deleted. SECURITY: scoped to the caller's visible
+        // projects (owner/admin → all; member → own/public), so the active-project
+        // count and by-type breakdown no longer leak company-wide project data.
+        const needsProjectScope = metric === "active_projects" || metric === "projects_by_type";
+        const projFilter = needsProjectScope ? await resolveVisibleProjectFilter(companyId, req.uid) : null;
         const activeProjectFilter = {
             statusType: { $ne: "close" },
             deletedStatusKey: { $in: [0, null] },
+            ...(projFilter || {}),
         };
 
         // Drill-down mode — clicking a count/bar opens a modal listing the
